@@ -1,0 +1,72 @@
+- name: server configuration
+  debugger: on_failed
+  hosts: n8n
+  remote_user: root
+  vars:
+    server_name: "hackathon"
+    domain_name: "claimsio.com"
+    subdomain: "hackathon.n8n"
+    timezone: "Europe/Berlin"
+    ssl_email: "admin@claimsio.com"
+    n8n_path: "/home/hackathon/app"
+
+  roles:
+    - { role: "roles/general", tags: [general] }
+    - { role: "roles/docker", tags: [docker] }
+
+  tasks:
+    - name: n8n | Install system packages
+      ansible.builtin.apt:
+        name:
+          - software-properties-common
+          - python3-pip
+        state: present
+        update_cache: yes
+      tags: ["n8n"]
+
+    - name: n8n | Create n8n directory
+      ansible.builtin.file:
+        path: "{{ n8n_path }}"
+        state: directory
+        mode: '0755'
+      tags: ["n8n"]
+
+    - name: n8n | Create Docker volumes
+      community.docker.docker_volume:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - n8n_data
+        - traefik_data
+      tags: ["n8n"]
+
+    - name: n8n | Copy n8n files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ n8n_path }}/{{ item.dest }}"
+        mode: '0644'
+      with_items:
+        - { src: 'n8n/docker-compose.yml.j2', dest: 'docker-compose.yml' }
+        # - { src: 'n8n/env.j2', dest: '.env' }
+      tags: ["n8n", "n8n-env"]
+
+    - name: n8n | Start n8n
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_path }}"
+        state: present
+      tags: ["n8n", "n8n-env"]
+
+    - name: n8n | Pull latest images
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_path }}"
+        build: never
+        pull: always
+        state: present
+      tags: ["n8n-update"]
+
+    - name: n8n | Restart services
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_path }}"
+        state: present
+        recreate: always
+      tags: ["n8n-update"]

@@ -1,0 +1,206 @@
+---
+- name: SETUP | Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: SETUP | Install zsh
+  ansible.builtin.apt:
+    name: zsh
+    state: present
+
+### root setup ###
+- name: SHELL | Check if zsh and oh-my-zsh are installed
+  ansible.builtin.shell: command -v zsh && zsh --version && [ -d "$HOME/.oh-my-zsh" ]
+  register: shell_check
+  ignore_errors: true
+  changed_when: false
+
+- name: SHELL | Install zsh, oh-my-zsh, jekyll theme (root)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      curl -sSL https://github.com/vesther/jovial/raw/master/installer.sh | sudo -E bash -s $USER
+    executable: /bin/bash
+  when: shell_check.rc != 0
+  register: install_result
+  changed_when: "'Successful' in install_result.stdout"
+
+- name: SETUP | Add tmux config (root)
+  ansible.builtin.copy:
+    dest: /root/.tmux.conf
+    src: .tmux.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+### g3ntl3man setup ###
+- name: SETUP | Create administrative g3ntl3man account
+  ansible.builtin.user:
+    name: g3ntl3man
+    password: "!"
+    groups: sudo
+    append: true
+    shell: /bin/zsh
+    createhome: true
+
+- name: SETUP | Assign g3ntl3man passwordless sudo privileges
+  ansible.builtin.lineinfile:
+    dest: /etc/sudoers
+    state: present
+    regexp: ^%sudo.*
+    line: "%sudo   ALL=(ALL:ALL) NOPASSWD: ALL"
+    validate: visudo -cf %s
+
+- name: SETUP | Create SSH directories (g3ntl3man)
+  ansible.builtin.file:
+    path: /home/g3ntl3man/.ssh
+    state: directory
+    owner: g3ntl3man
+    group: g3ntl3man
+    mode: "0700"
+
+- name: SETUP | Copy SSH keys (g3ntl3man)
+  ansible.builtin.copy:
+    src: authorized_keys
+    dest: /home/g3ntl3man/.ssh/authorized_keys
+    owner: g3ntl3man
+    group: g3ntl3man
+    mode: "0600"
+
+### App user setup ###
+- name: SETUP | Create application-specific account ({{ server_name }})
+  ansible.builtin.user:
+    name: "{{ server_name }}"
+    shell: /bin/zsh
+    createhome: true
+
+- name: SETUP | Change permissions to o=rx on /home/{{ server_name }}
+  ansible.builtin.file:
+    dest: /home/{{ server_name }}
+    mode: o=rx
+
+- name: SETUP | Create SSH directories
+  ansible.builtin.file:
+    path: /home/{{ server_name }}/.ssh
+    state: directory
+    owner: "{{ server_name }}"
+    group: "{{ server_name }}"
+    mode: "0700"
+
+- name: SETUP | Copy SSH key
+  ansible.builtin.copy:
+    src: authorized_keys
+    dest: /home/{{ server_name }}/.ssh/authorized_keys
+    owner: "{{ server_name }}"
+    group: "{{ server_name }}"
+    mode: "0600"
+
+- name: SETUP | Add deployment SSH key
+  ansible.posix.authorized_key:
+    user: "{{ server_name }}"
+    key: "{{ deployment_key }}"
+    state: present
+  when: deployment_key is defined
+
+### Common user setup ###
+- name: SHELL | Copy .zshrc to g3ntl3man and app user
+  ansible.builtin.copy:
+    remote_src: true
+    src: /root/.zshrc
+    dest: /home/{{ item.name }}/.zshrc
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  loop:
+    - name: g3ntl3man
+    - name: "{{ server_name }}"
+
+- name: SHELL | Copy .oh-my-zsh to g3ntl3man and app user
+  ansible.builtin.copy:
+    remote_src: true
+    src: /root/.oh-my-zsh
+    dest: /home/{{ item.name }}
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0755"
+  loop:
+    - name: g3ntl3man
+    - name: "{{ server_name }}"
+
+- name: SHELL | Copy .tmux.conf to g3ntl3man and app user
+  ansible.builtin.copy:
+    remote_src: true
+    src: /root/.tmux.conf
+    dest: /home/{{ item.name }}/.tmux.conf
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+  loop:
+    - name: g3ntl3man
+    - name: "{{ server_name }}"
+
+### General setup ###
+- name: "SETUP | Install required packages"
+  ansible.builtin.apt:
+   name:
+     - ca-certificates     # SSL certificates
+     - curl                # Data transfer tool
+     - gnupg               # Encryption tool
+     - apt-transport-https # Secure apt
+     - openssl             # SSL toolkit
+     - build-essential     # Build tools
+     - make                # Build automation
+     - pkg-config          # Compile flags
+     - autoconf            # Config scripts
+     - automake            # Generate Makefiles
+     - libtool             # Library support
+     - libssl-dev          # SSL development
+     - zlib1g              # Compression lib
+     - libreadline8        # CLI editing
+     - libpq-dev           # PostgreSQL dev
+     - lsb-release         # Linux Standard Base
+   state: present
+
+- name: "SETUP | Install additional packages (Ubuntu 22.04)"
+  when: ansible_distribution_release == "jammy"
+  ansible.builtin.apt:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - tmux
+    - ripgrep
+    - bat
+    - ncdu
+
+- name: "SETUP | Install additional packages (Ubuntu 24.04)"
+  when: ansible_distribution_release == "noble"
+  ansible.builtin.apt:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - tmux
+    - ripgrep
+    - bat
+    - ncdu
+
+- name: SETUP | Copy motd file to remote
+  vars:
+    local_file: "{{ role_path }}/files/motd/{{ project_environment }}.motd"
+  when:
+    - project_environment is defined
+    - lookup( 'file', local_file, errors='ignore' )
+  ansible.builtin.copy:
+    src: "{{ local_file }}"
+    dest: /etc/motd
+    mode: "0644"
+
+- name: SETUP | Set timezone to {{ timezone }}
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: SETUP | Setup unattended updates
+  ansible.builtin.include_role:
+    name: hifis.unattended_upgrades
+  # noqa: var-naming[no-role-prefix]
+  vars:
+    unattended_update_days: '{ "Sunday" }'

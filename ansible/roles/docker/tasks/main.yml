@@ -1,0 +1,137 @@
+---
+- name: "DOCKER | Check the architecture of the system"
+  ansible.builtin.debug:
+    msg: "{{ [ansible_architecture] | map('extract', deb_architecture) | first }}"
+
+- name: "DOCKER | Install repository dependencies"
+  ansible.builtin.apt:
+    pkg:
+      - ca-certificates
+      - curl
+    update_cache: true
+
+- name: "DOCKER | Create the directory for apt keyrings"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: "DOCKER | Check if Docker's official GPG key is already downloaded"
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/docker.asc
+  register: docker_key
+
+- name: "DOCKER | Download Docker's official GPG key"
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  when: not docker_key.stat.exists
+
+- name: "DOCKER | Remove existing Docker repository entries"
+  ansible.builtin.file:
+    path: "/etc/apt/sources.list.d/docker.list"
+    state: absent
+
+- name: "DOCKER | Remove existing Docker GPG keys"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/apt/keyrings/docker.gpg"
+    - "/etc/apt/keyrings/docker.asc"
+
+- name: "DOCKER | Add Docker GPG apt Key"
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    force: true
+
+- name: "DOCKER | Add Docker Repository"
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ [ansible_architecture] | map('extract', deb_architecture) | first }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+    state: present
+    update_cache: false
+
+- name: "DOCKER | Install docker packages"
+  ansible.builtin.apt:
+    pkg:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    update_cache: true
+
+- name: "DOCKER | Add app user to docker group"
+  ansible.builtin.user:
+    name: "{{ server_name }}"
+    groups: docker
+    append: true
+  when: server_name is defined
+  notify: Restart docker
+
+- name: "DOCKER | Set log driver to json-file"
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m"
+        },
+        "debug": true
+      }
+    mode: '0644'
+  notify: Restart docker
+
+- name: "DOCKER | Get the latest Lazydocker version tag from GitHub"
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -s "https://api.github.com/repos/jesseduffield/lazydocker/releases/latest" | grep -Po '"tag_name": "v\K[0-9.]+'
+  register: lazydocker_release_info
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: "DOCKER | Set the Lazydocker version fact"
+  ansible.builtin.set_fact:
+    lazydocker_version: "{{ lazydocker_release_info.stdout }}"
+
+- name: "DOCKER | Download Lazydocker archive"
+  ansible.builtin.get_url:
+    url: "https://github.com/jesseduffield/lazydocker/releases/latest/download/lazydocker_{{ lazydocker_version }}_Linux_{{ ansible_architecture }}.tar.gz"
+    dest: /tmp/lazydocker.tar.gz
+    mode: '0644'
+
+- name: "DOCKER | Create a temporary directory for Lazydocker"
+  ansible.builtin.file:
+    path: /tmp/lazydocker-temp
+    state: directory
+    mode: '0755'
+
+- name: "DOCKER | Extract Lazydocker archive"
+  ansible.builtin.unarchive:
+    src: /tmp/lazydocker.tar.gz
+    dest: /tmp/lazydocker-temp
+    remote_src: true
+
+- name: "DOCKER | Move Lazydocker binary to /usr/local/bin"
+  ansible.builtin.command:
+    cmd: mv /tmp/lazydocker-temp/lazydocker /usr/local/bin/lazydocker
+  args:
+    creates: /usr/local/bin/lazydocker
+
+- name: "DOCKER | Ensure Lazydocker is executable"
+  ansible.builtin.file:
+    path: /usr/local/bin/lazydocker
+    mode: '0755'
+
+- name: "DOCKER | Clean up archive and temporary directory"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/lazydocker.tar.gz
+    - /tmp/lazydocker-temp
